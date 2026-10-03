@@ -105,8 +105,8 @@
 **1️⃣ 获取代码**
 
 ```bash
-git clone https://github.com/<你的用户名>/<仓库名>.git
-cd <仓库名>
+git clone https://github.com/sq201314/shimo.git
+cd shimo
 ```
 
 **2️⃣ 创建环境**
