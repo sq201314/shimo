@@ -1,0 +1,36 @@
+# ===== Python =====
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# ===== 虚拟环境（5GB，绝不上传）=====
+venv/
+.venv/
+env/
+
+# ===== 编辑器 / 本地工具 =====
+.vscode/
+.claude/
+.idea/
+
+# ===== 运行时生成（采集/标注/训练进度）=====
+data/
+runs/
+train_progress.txt
+*.cache
+
+# ===== 训练输出（可重新生成，模型成品在 models/）=====
+train_military/runs/
+
+# ===== 数据集压缩包（787MB，超 GitHub 100MB 限制）=====
+*.zip
+*.tar
+*.tar.gz
+
+# ===== 系统文件 =====
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ===== 日志 =====
+*.log

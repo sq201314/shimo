@@ -1,0 +1,19 @@
+{
+  "settings_version": "0.0.8",
+  "datasets_dir": "D:\\shimo\\datasets",
+  "weights_dir": "weights",
+  "runs_dir": "runs",
+  "uuid": "31896b17047b2c7d0f35f41244c9e2c0eade3fe20d3610a8d7d2acc06262899d",
+  "sync": true,
+  "api_key": "",
+  "openai_api_key": "",
+  "clearml": true,
+  "comet": true,
+  "dvc": true,
+  "mlflow": true,
+  "raytune": true,
+  "tensorboard": false,
+  "wandb": false,
+  "vscode_msg": true,
+  "openvino_msg": true
+}

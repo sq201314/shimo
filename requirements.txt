@@ -1,0 +1,17 @@
+# AI 智能识别系统依赖清单（Python 3.10 / Windows）
+# 安装步骤详见 安装说明书.md
+
+# --- 第一步：PyTorch GPU 版（CUDA 12.8）单独安装，本地版本号不在 PyPI 上，不能走本文件 ---
+# pip install torch==2.11.0+cu128 torchvision==0.26.0+cu128 --index-url https://download.pytorch.org/whl/cu128
+# torch==2.11.0+cu128
+# torchvision==0.26.0+cu128
+
+# --- 核心依赖 ---
+opencv-python==4.10.0.84
+PyQt5==5.15.11
+ultralytics==8.4.171
+mediapipe==1.0.1
+labelImg==1.8.6
+Pillow==12.3.0
+matplotlib==3.10.9
+numpy==2.2.6
