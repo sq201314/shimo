@@ -30,6 +30,8 @@ from ui.progress import CaptureDialog
 from ui.toggle import ToggleButton
 from ui.loading import LoadingPage
 
+camera = 0  # 摄像头索引，0为默认摄像头
+
 # 添加 core 目录到模块搜索路径
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "core"))
 
@@ -429,7 +431,7 @@ class MainWindow(QWidget):
     def _do_connect(self):
         ok = MsgDialog.ask(self, "确认", "是否接入摄像头画面？")
         if not ok: return
-        self.cap = cv2.VideoCapture(0)
+        self.cap = cv2.VideoCapture(camera)
         if not self.cap.isOpened():
             MsgDialog.info(self, "错误", "无法打开摄像头")
             return
