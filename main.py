@@ -29,6 +29,7 @@ from ui.splash import SplashScreen
 from ui.progress import CaptureDialog
 from ui.toggle import ToggleButton
 from ui.loading import LoadingPage
+from ui.lock_dialog import LockDialog, ALERT_TEXT
 
 camera = 0  # 摄像头索引，0为默认摄像头
 
@@ -49,6 +50,7 @@ class Sig(QObject):
     det_stopped = pyqtSignal(str, int)  # 检测停止信号（参数：mode, 会话序号）
     models_ready = pyqtSignal()    # 模型加载完成信号
     task_done = pyqtSignal(str)    # 单个加载任务完成（参数：task_id）
+    lock_trigger = pyqtSignal()    # Ctrl+鼠标左键 触发锁定确认（钩子线程 → 主线程）
 
 
 class _TrainLogWriter:
@@ -262,6 +264,15 @@ class MainWindow(QWidget):
         self._det_seq = 0  # 检测会话序号：每次切换+1，旧线程检测到变化立即自行退出（不阻塞UI）
         self._switch_lock = threading.Lock()  # 切换锁，防止频繁切换冲突
 
+        # ---- 锁定确认（Ctrl+鼠标左键 语音播报+弹窗，姿态骨骼除外） ----
+        self._last_det = None      # 最新检测结果 (frame, detections)，检测线程写
+        self._det_lock = threading.Lock()  # 保护 _last_det
+        self._lock_on = False      # Yes锁定后：画面标注红框
+        self._lock_dlg = None      # 当前锁定确认弹窗（打开期间忽略新触发）
+        self.s.lock_trigger.connect(self._on_lock_trigger)
+        import hotkey
+        hotkey.start(lambda: self.s.lock_trigger.emit())
+
     def _cleanup(self):
         """退出时清理所有资源"""
         self.running = False
@@ -279,8 +290,16 @@ class MainWindow(QWidget):
             gc.collect()
         except:
             pass
+        # 停止全局热键钩子与语音播报
+        try:
+            import hotkey
+            hotkey.stop()
+            import tts
+            tts.stop()
+        except Exception:
+            pass
         # 关闭弹窗和子控件
-        for attr in ['cap_dialog', 'log_area', 'glass_bar']:
+        for attr in ['cap_dialog', 'log_area', 'glass_bar', '_lock_dlg']:
             if hasattr(self, attr):
                 try:
                     obj = getattr(self, attr)
@@ -778,6 +797,15 @@ class MainWindow(QWidget):
             self._det_seq += 1          # 旧线程回调发现序号变化立即返回False
             self.pose_running = False
             self.running = False
+            # 重置锁定确认状态（红框、最新结果、未关闭的弹窗）
+            self._lock_on = False
+            self._last_det = None
+            if self._lock_dlg:
+                try:
+                    self._lock_dlg.close()
+                except Exception:
+                    pass
+                self._lock_dlg = None
             # 重置所有按钮样式
             self.btn_obj.setStyleSheet(self._det_btn_style)
             self.btn_person.setStyleSheet(self._det_btn_style)
@@ -1001,15 +1029,8 @@ class MainWindow(QWidget):
             if not model_name:
                 return
 
-            def cb(frame, dets):
-                if self._det_seq != seq:  # 会话已切换 → 立即退出
-                    return False
-                qimg = self._qimg(frame)
-                if qimg:
-                    self.s.img.emit(qimg)
-                return True
-
-            object_detect.run_single(get_frame=self._get_frame, model_name=model_name, callback=cb)
+            object_detect.run_single(get_frame=self._get_frame, model_name=model_name,
+                                     callback=self._make_det_cb(seq))
         except Exception as e:
             print(f"目标检测线程错误: {e}")
         finally:
@@ -1021,19 +1042,85 @@ class MainWindow(QWidget):
             sys.path.insert(0, os.path.join(BASE_DIR, "core"))
             import person_detect
 
-            def cb(frame, dets):
-                if self._det_seq != seq:  # 会话已切换 → 立即退出
-                    return False
-                qimg = self._qimg(frame)
-                if qimg:
-                    self.s.img.emit(qimg)
-                return True
-
-            person_detect.run(get_frame=self._get_frame, callback=cb)
+            person_detect.run(get_frame=self._get_frame,
+                              callback=self._make_det_cb(seq))
         except Exception as e:
             print(f"人体检测线程错误: {e}")
         finally:
             self.s.det_stopped.emit("person", seq)
+
+    # ---- 锁定确认（Ctrl+鼠标左键 → 语音播报+弹窗，姿态骨骼除外） ----
+    def _make_det_cb(self, seq):
+        """目标/人体检测共用回调：缓存最新结果 + 锁定后叠加红框 + 显示画面"""
+        def cb(frame, dets):
+            if self._det_seq != seq:  # 会话已切换 → 立即退出
+                return False
+            with self._det_lock:
+                self._last_det = (frame.copy(), list(dets)) if dets else None
+            if not dets:
+                # 目标丢失 → 自动解除红框锁定，重新识别后需再走 Ctrl+左键 确认流程
+                self._lock_on = False
+            elif self._lock_on:
+                # Yes锁定后：主目标标注红色框
+                x1, y1, x2, y2, label, _ = self._primary_det(dets)
+                cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
+                cv2.putText(frame, f"LOCKED {label}", (x1, y1 - 8),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            qimg = self._qimg(frame)
+            if qimg:
+                self.s.img.emit(qimg)
+            return True
+        return cb
+
+    @staticmethod
+    def _primary_det(dets):
+        """主目标 = 面积最大的检测框（触发截取与红框标注用同一规则）"""
+        return max(dets, key=lambda d: (d[2] - d[0]) * (d[3] - d[1]))
+
+    def _on_lock_trigger(self):
+        """Ctrl+鼠标左键（钩子线程经信号转到主线程）"""
+        # 姿态骨骼、非识别模式、无目标、弹窗已打开时均不响应
+        if self._active_det not in ("obj", "person"):
+            return
+        if self._lock_dlg is not None:
+            return
+        with self._det_lock:
+            det = self._last_det
+        if not det:
+            return
+        frame, dets = det
+        x1, y1, x2, y2, _, _ = self._primary_det(dets)
+        crop = frame[max(0, y1):max(1, y2), max(0, x1):max(1, x2)]
+        if crop is None or crop.size == 0:
+            return
+        crop = crop.copy()
+        ch, cw = crop.shape[:2]
+        cv2.rectangle(crop, (2, 2), (cw - 3, ch - 3), (0, 0, 255), 3)  # 框选目标描红
+        dlg = LockDialog(ALERT_TEXT, crop, self)
+        dlg.yes_clicked.connect(self._on_lock_yes)
+        dlg.answered.connect(self._on_lock_answered)
+        self._lock_dlg = dlg
+        dlg.show()
+        dlg.raise_()
+        dlg.activateWindow()
+        import tts
+        tts.speak(ALERT_TEXT)  # 语音播报弹窗文本
+
+    def _on_lock_yes(self):
+        """选择Yes：弹窗消失后画面持续标注红框"""
+        self._lock_on = True
+
+    def _on_lock_answered(self):
+        """弹窗以任意方式关闭：停语音、清引用（No不改变画面）"""
+        import tts
+        tts.stop()
+        dlg = self.sender()
+        if isinstance(dlg, LockDialog):
+            if self._lock_dlg is dlg:
+                self._lock_dlg = None
+            dlg.deleteLater()
+        else:
+            self._lock_dlg = None
 
     # ---- 显示 ----
     def _show(self, qimg):
