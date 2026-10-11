@@ -31,7 +31,7 @@ from ui.toggle import ToggleButton
 from ui.loading import LoadingPage
 from ui.lock_dialog import LockDialog, ALERT_TEXT
 
-camera = 0  # 摄像头索引，0为默认摄像头
+camera = 1  # 摄像头索引，0为默认摄像头
 
 # 添加 core 目录到模块搜索路径
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "core"))
@@ -51,6 +51,7 @@ class Sig(QObject):
     models_ready = pyqtSignal()    # 模型加载完成信号
     task_done = pyqtSignal(str)    # 单个加载任务完成（参数：task_id）
     lock_trigger = pyqtSignal()    # Ctrl+鼠标左键 触发锁定确认（钩子线程 → 主线程）
+    pip = pyqtSignal(QImage, int)  # 放大跟踪小窗：原画面图+会话序号（null图=隐藏，检测线程 → 主线程）
 
 
 class _TrainLogWriter:
@@ -229,6 +230,19 @@ class MainWindow(QWidget):
         self.view.setAlignment(Qt.AlignCenter)
         self.view.setStyleSheet("border: 3px solid #555; background: transparent;")
 
+        # 放大跟踪原画面小窗：预览框右下角固定位置（仅放大时显示）
+        sys.path.insert(0, os.path.join(BASE_DIR, "core"))
+        from zoom_track import PIP_SIZE, PIP_MARGIN
+        self._pip_size, self._pip_margin = PIP_SIZE, PIP_MARGIN
+        self.pip_label = QLabel(self.view)
+        self.pip_label.setFixedSize(PIP_SIZE, PIP_SIZE)
+        self.pip_label.setScaledContents(True)  # 原画面小窗按框缩放（尺寸=PIP_SIZE）
+        self.pip_label.setStyleSheet(
+            "background: #000; border: 2px solid #C8C8C8;")
+        self.pip_label.move(vw - PIP_SIZE - PIP_MARGIN,
+                            vh - PIP_SIZE - PIP_MARGIN)
+        self.pip_label.hide()
+
         # 进度条
         pw = max(300, int(w * 0.4))
         self.pbar = QProgressBar(self)
@@ -248,6 +262,7 @@ class MainWindow(QWidget):
         self.s.det_stopped.connect(self._on_det_stopped)
         self.s.models_ready.connect(self._on_models_ready)
         self.s.task_done.connect(self._on_task_done)
+        self.s.pip.connect(self._on_pip)
 
         # 状态
         self.cap = None
@@ -342,6 +357,10 @@ class MainWindow(QWidget):
         vh = max(200, h - vy - int(h * 0.08))
         self.view.setFixedSize(vw, vh)
         self.view.move((w - vw) // 2, vy)
+        # 小窗固定在预览框右下角
+        if getattr(self, 'pip_label', None):
+            self.pip_label.move(vw - self._pip_size - self._pip_margin,
+                                vh - self._pip_size - self._pip_margin)
         pw = max(300, int(w * 0.4))
         self.pbar.setFixedWidth(pw)
         self.pbar.move((w - pw) // 2, int(h * 0.90))
@@ -797,6 +816,10 @@ class MainWindow(QWidget):
             self._det_seq += 1          # 旧线程回调发现序号变化立即返回False
             self.pose_running = False
             self.running = False
+            # 隐藏放大跟踪原画面小窗
+            if getattr(self, 'pip_label', None):
+                self.pip_label.hide()
+                self.pip_label.clear()
             # 重置锁定确认状态（红框、最新结果、未关闭的弹窗）
             self._lock_on = False
             self._last_det = None
@@ -984,6 +1007,10 @@ class MainWindow(QWidget):
         只处理当前会话的自然退出；切换时旧会话的通知直接忽略（样式已在停止时重置）"""
         if seq != self._det_seq:
             return
+        # 检测自然停止 → 隐藏原画面小窗
+        if getattr(self, 'pip_label', None):
+            self.pip_label.hide()
+            self.pip_label.clear()
         if self._active_det == mode:
             self._active_det = None
         if mode == "obj":
@@ -1051,20 +1078,37 @@ class MainWindow(QWidget):
 
     # ---- 锁定确认（Ctrl+鼠标左键 → 语音播报+弹窗，姿态骨骼除外） ----
     def _make_det_cb(self, seq):
-        """目标/人体检测共用回调：缓存最新结果 + 锁定后叠加红框 + 显示画面"""
+        """目标/人体检测共用回调：裁剪放大跟踪 + 缓存最新结果 + 锁定后叠加红框 + 显示画面"""
+        sys.path.insert(0, os.path.join(BASE_DIR, "core"))
+        from zoom_track import ZoomTracker, build_origin_pip
+        zoom = ZoomTracker()  # 每个检测会话独立跟踪状态（姿态骨骼不走此回调）
+        pip_state = {"on": False}  # 小窗显示状态（只在状态变化/放大时发信号）
+
         def cb(frame, dets):
             if self._det_seq != seq:  # 会话已切换 → 立即退出
                 return False
+            full = frame  # 原尺寸全画面（右下角固定小窗用）
+            # 识别到目标 → 自动裁剪放大跟踪（目标保持在画面中间）；
+            # 短暂丢失冻结窗口防闪烁，真正丢失回到原比例
+            # 检测仍在原尺寸帧上完成，此处只裁剪显示画面并平移检测坐标
+            frame, dets, zoomed = zoom.apply(frame, dets)
+            if zoomed:
+                # 放大中 → 预览框右下角固定位置显示原画面小窗（PIP_SIZE）
+                self.s.pip.emit(self._qimg(build_origin_pip(full)), seq)
+                pip_state["on"] = True
+            elif pip_state["on"]:
+                pip_state["on"] = False
+                self.s.pip.emit(QImage(), seq)  # null图 → 隐藏小窗
             with self._det_lock:
                 self._last_det = (frame.copy(), list(dets)) if dets else None
             if not dets:
                 # 目标丢失 → 自动解除红框锁定，重新识别后需再走 Ctrl+左键 确认流程
                 self._lock_on = False
             elif self._lock_on:
-                # Yes锁定后：主目标标注红色框
+                # Yes锁定后：主目标标注红色框（坐标已平移到裁剪画面）
                 x1, y1, x2, y2, label, _ = self._primary_det(dets)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
-                cv2.putText(frame, f"LOCKED {label}", (x1, y1 - 8),
+                cv2.putText(frame, f"LOCKED {label}", (x1, max(y1 - 8, 14)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
             qimg = self._qimg(frame)
             if qimg:
@@ -1123,6 +1167,17 @@ class MainWindow(QWidget):
             self._lock_dlg = None
 
     # ---- 显示 ----
+    def _on_pip(self, qimg, seq):
+        """放大跟踪原画面小窗（预览框右下角固定位置）：null图=隐藏"""
+        if seq != self._det_seq:  # 旧会话残留信号直接忽略
+            return
+        if qimg.isNull():
+            self.pip_label.hide()
+            self.pip_label.clear()
+        else:
+            self.pip_label.setPixmap(QPixmap.fromImage(qimg))
+            self.pip_label.show()
+
     def _show(self, qimg):
         vw, vh = self.view.width(), self.view.height()
         iw, ih = qimg.width(), qimg.height()
