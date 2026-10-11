@@ -1,49 +1,36 @@
 # 目标检测模型目录
 
-每个子文件夹为一个独立模型，包含：
-- `best.pt` — YOLO 模型权重
-- `classes.txt` — 类别名称（每行一个）
+**模型放本目录顶层**（`models/xxx.pt`），程序启动时自动扫描加载，文件名即"目标检测"下拉菜单里的显示名。
+
+> 注意：只扫描顶层 `.pt`，子文件夹不会被加载；文件名不能以 `yolo` 开头（会被当基础模型排除）。
 
 ## 已有模型
 
-| 文件夹 | 目标 | 状态 |
-|--------|------|------|
-| military/ | 坦克 | ✅ 已训练 |
-| balloon/ | 气球 | ❌ 需下载 |
-| ship/ | 轮船 | ❌ 需下载 |
+| 文件 | 目标 | 类型配置 |
+|------|------|----------|
+| tank.pt | 坦克 | 橙色框，只显示 tank 类 |
+| warship.pt | 轮船 | 青色框，显示 warship/ship 类 |
+| qiqiu1.pt | 气球 | 粉色框，显示 balloon 类 |
+| yolo11n.pt | COCO 基础模型 | 被排除，不进下拉菜单 |
 
 ## 添加新模型
 
-1. 创建文件夹 `models/你的模型名/`
-2. 放入 `best.pt`（YOLO格式）
-3. 放入 `classes.txt`（类别名称）
-4. 重启程序，自动加载
+1. 取得 YOLO 权重 `best.pt`（自己训练或下载）
+2. 复制到本目录并起名：`copy 训练输出\weights\best.pt models\你的模型名.pt`
+3. （建议）在 `core/object_detect.py` 顶部三个字典里加配置：
+   - `MODEL_TYPE`：模型名 → 目标类型（决定用哪套颜色和关键词）
+   - `MODEL_COLORS`：目标类型的框颜色（BGR）
+   - `TYPE_KEYWORDS`：该类型只显示的类别关键词（整词匹配）
+4. 重启程序，下拉菜单自动出现新模型
 
-## 气球模型下载
+**不配置也能跑**：默认绿色框、模型所有类别全部显示。
 
-在终端执行：
-```bash
-d:\shimo\venv\Scripts\python.exe -c "
-from huggingface_hub import hf_hub_download
-path = hf_hub_download(repo_id='keremberke/yolov8m-balloon-detection', filename='best.pt', local_dir='d:/shimo/models/balloon', local_dir_use_symlinks=False)
-print(f'下载完成: {path}')
-"
-```
+**零配置技巧**：文件名起成已有类型名（如 `balloon.pt`），直接复用该类型的配置。
 
-## 轮船模型下载
+## 类别名来源
 
-在终端执行：
-```bash
-d:\shimo\venv\Scripts\python.exe -c "
-from huggingface_hub import hf_hub_download
-path = hf_hub_download(repo_id='keremberke/yolov8n-vessel-detection', filename='best.pt', local_dir='d:/shimo/models/ship', local_dir_use_symlinks=False)
-print(f'下载完成: {path}')
-"
-```
+优先读 `.pt` 内嵌的 `model.names`；缺失时回退读本目录 `classes.txt`（每行一个类名，与 `.pt` 同级）。
 
 ## 自己训练的模型
 
-将训练好的 `best.pt` 复制到对应文件夹即可：
-```bash
-copy 训练输出\weights\best.pt models\你的模型名\best.pt
-```
+程序内"采集 → 标注 → 训练"流程的产物在 `runs/train/weights/best.pt`，复制改名进本目录即可。

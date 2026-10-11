@@ -67,7 +67,7 @@ def main():
     print(f"  最优模型: {PROJECT_DIR}/tank_ship/weights/best.pt")
     print(f"  末尾模型: {PROJECT_DIR}/tank_ship/weights/last.pt")
     print("=" * 50)
-    print("\n请将 best.pt 复制到 models/military/best.pt 以供主程序使用")
+    print("\n请将 best.pt 复制到 models/ 顶层并命名，如 models/tank.pt（文件名即菜单名）")
 
 
 if __name__ == "__main__":

@@ -9,6 +9,7 @@
 """
 import cv2
 import os
+import re
 import threading
 import torch
 from ultralytics import YOLO
@@ -16,7 +17,14 @@ from ultralytics import YOLO
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODELS_DIR = os.path.join(BASE_DIR, "models")
 
-# 不同目标的框颜色（BGR）
+# 模型文件名 -> 目标类型（用于取颜色和关键词）
+MODEL_TYPE = {
+    "qiqiu1": "balloon",
+    "tank": "tank",
+    "warship": "ship",
+}
+
+# 不同目标类型的框颜色（BGR），键为 MODEL_TYPE 的值
 MODEL_COLORS = {
     "tank":    (0, 165, 255),   # 橙色 - 坦克
     "balloon": (255, 0, 255),   # 粉色 - 气球
@@ -24,14 +32,26 @@ MODEL_COLORS = {
 }
 DEFAULT_COLOR = (0, 255, 0)
 
-CONF_THRESH = 0.7
+CONF_THRESH = 0.5
 
-# 每个模型只识别的目标关键词（类别名包含关键词才显示）
-MODEL_KEYWORDS = {
-    "qiqiu1": ["balloon", "ballon", "balon", "baloon", "ball"],
+# 每个目标类型只识别的关键词（类别名整词匹配关键词才显示）
+# 不放 "ball"：会误纳 basketball/football 等
+TYPE_KEYWORDS = {
+    "balloon": ["balloon", "ballon", "balon", "baloon"],
     "tank": ["tank"],
-    "warship": ["warship", "ship"],
+    "ship": ["warship", "ship"],
 }
+
+
+def _get_type(model_name):
+    """模型名 -> 目标类型（未知模型用模型名兜底）"""
+    return MODEL_TYPE.get(model_name, model_name)
+
+
+def _match_keywords(cls_name, keywords):
+    """整词匹配：'basketball' 不命中 'ball'，'hot air balloon' 命中 'balloon'"""
+    words = set(re.split(r"[^a-z0-9]+", str(cls_name).lower()))
+    return any(k in words for k in keywords)
 
 _loaded_models = []  # [(name, model, color, classes), ...]
 _device = None
@@ -88,7 +108,7 @@ def preload_one(pt_path):
     warmup_once(_warm)
 
     classes = model.names if model.names else _load_classes(pt_path)
-    color = MODEL_COLORS.get(name, DEFAULT_COLOR)
+    color = MODEL_COLORS.get(_get_type(name), DEFAULT_COLOR)
     with _load_lock:
         _loaded_models.append((name, model, color, classes))
     print(f"  → {name} 类别: {classes}, 颜色: {color}")
@@ -125,13 +145,13 @@ def run_single(get_frame, model_name, callback=None):
     name, model, color, classes = target
     print(f"[目标检测] 使用模型: {name}")
 
-    # 计算允许显示的类别ID（只识别对应目标）
-    keywords = MODEL_KEYWORDS.get(name)
+    # 计算允许显示的类别ID（只识别对应目标类型）
+    keywords = TYPE_KEYWORDS.get(_get_type(name))
     allowed_ids = None
     if keywords:
         allowed_ids = {
             cid for cid, cname in classes.items()
-            if any(k in str(cname).lower() for k in keywords)
+            if _match_keywords(cname, keywords)
         }
 
     while True:
