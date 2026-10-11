@@ -32,7 +32,7 @@ MODEL_COLORS = {
 }
 DEFAULT_COLOR = (0, 255, 0)
 
-CONF_THRESH = 0.5
+CONF_THRESH = 0.6  # 置信度 >= 0.6 才显示
 
 # 每个目标类型只识别的关键词（类别名整词匹配关键词才显示）
 # 不放 "ball"：会误纳 basketball/football 等

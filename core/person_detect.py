@@ -17,7 +17,7 @@ BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 MODEL_PATH = os.path.join(BASE_DIR, "models", "yolo11n.pt")
 
 # 检测参数
-CONF_THRESH = 0.5  # 置信度 >= 0.7 才显示
+CONF_THRESH = 0.6  # 置信度 >= 0.7 才显示
 COLOR_PERSON = (0, 255, 0)  # 绿色边框
 
 _model = None
