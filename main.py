@@ -40,6 +40,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "cor
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 GIF_PATH = os.path.join(BASE_DIR, "8.gif")
 CAPTURE_COUNT = 4
+CROP_WIN = 300  # 预览框左侧"识别目标小窗"边长（px），仅智能识别运行时显示
 
 
 class Sig(QObject):
@@ -53,6 +54,7 @@ class Sig(QObject):
     task_done = pyqtSignal(str)    # 单个加载任务完成（参数：task_id）
     lock_trigger = pyqtSignal()    # Ctrl+鼠标左键 触发锁定确认（钩子线程 → 主线程）
     pip = pyqtSignal(QImage, int)  # 放大跟踪小窗：原画面图+会话序号（null图=隐藏，检测线程 → 主线程）
+    crop = pyqtSignal(QImage, int)  # 识别目标小窗：主目标框内画面+会话序号（检测线程 → 主线程）
 
 
 class _TrainLogWriter:
@@ -249,6 +251,18 @@ class MainWindow(QWidget):
                             vh - PIP_SIZE - PIP_MARGIN)
         self.pip_label.hide()
 
+        # 识别目标小窗：预览框左侧 CROP_WIN×CROP_WIN，
+        # 显示模型检测框圈出的主目标画面（仅目标/人体检测运行时显示）
+        self.crop_label = QLabel(self)
+        self.crop_label.setAlignment(Qt.AlignCenter)
+        self.crop_label.setStyleSheet(
+            "background: #000; border: 2px solid #C8C8C8;"
+            "color: #888; font-size: 15px;")
+        self.crop_label.setText("等待识别")
+        self._crop_size = CROP_WIN
+        self.crop_label.hide()
+        self._place_crop_label()
+
         # 进度条
         pw = max(300, int(w * 0.4))
         self.pbar = QProgressBar(self)
@@ -269,6 +283,7 @@ class MainWindow(QWidget):
         self.s.models_ready.connect(self._on_models_ready)
         self.s.task_done.connect(self._on_task_done)
         self.s.pip.connect(self._on_pip)
+        self.s.crop.connect(self._on_crop)
 
         # 状态
         self.cap = None
@@ -367,9 +382,25 @@ class MainWindow(QWidget):
         if getattr(self, 'pip_label', None):
             self.pip_label.move(vw - self._pip_size - self._pip_margin,
                                 vh - self._pip_size - self._pip_margin)
+        # 识别目标小窗固定在预览框左侧（垂直居中）
+        self._place_crop_label()
         pw = max(300, int(w * 0.4))
         self.pbar.setFixedWidth(pw)
         self.pbar.move((w - pw) // 2, int(h * 0.90))
+
+    def _place_crop_label(self):
+        """识别目标小窗定位：预览框左侧、垂直居中（窗口缩放时自适应）
+        左侧放不下 CROP_WIN 时等比缩小，保证不与预览框重叠"""
+        if not getattr(self, 'crop_label', None):
+            return
+        vx, vy = self.view.x(), self.view.y()
+        vh = self.view.height()
+        avail = vx - 8  # 预览框左侧可用宽度（含 8px 左边距）
+        size = min(CROP_WIN, max(120, avail - 8))
+        gap = max(4, min(20, avail - size))  # 正常留 20px，放不下时收窄
+        self._crop_size = size
+        self.crop_label.setFixedSize(size, size)
+        self.crop_label.move(vx - size - gap, vy + (vh - size) // 2)
 
     def resizeEvent(self, e):
         if hasattr(self, 'bg'): self._layout()
@@ -832,6 +863,8 @@ class MainWindow(QWidget):
             if getattr(self, 'pip_label', None):
                 self.pip_label.hide()
                 self.pip_label.clear()
+            # 隐藏识别目标小窗（仅目标/人体检测运行时显示）
+            self._hide_crop_panel()
             # 重置锁定确认状态（红框、最新结果、未关闭的弹窗）
             self._lock_on = False
             self._last_det = None
@@ -871,6 +904,10 @@ class MainWindow(QWidget):
             btn.setStyleSheet(self._det_btn_active)
             self.running = False
             seq = self._det_seq
+            # 识别目标小窗：仅目标/人体检测运行时显示
+            # （姿态骨骼只有骨架点、没有模型框，不显示；停止检测时隐藏）
+            if mode in ("obj", "person"):
+                self._show_crop_panel()
             if mode == "pose":
                 self.pose_running = True
                 threading.Thread(target=self._pose_thread, args=(seq,), daemon=True).start()
@@ -926,6 +963,7 @@ class MainWindow(QWidget):
             self.btn_obj.setStyleSheet(self._det_btn_active)
             self.running = False
             seq = self._det_seq
+            self._show_crop_panel()
             threading.Thread(target=self._obj_thread, args=(seq,), daemon=True).start()
 
     def _on_person_toggle(self):
@@ -1023,6 +1061,8 @@ class MainWindow(QWidget):
         if getattr(self, 'pip_label', None):
             self.pip_label.hide()
             self.pip_label.clear()
+        # 检测自然停止 → 隐藏识别目标小窗
+        self._hide_crop_panel()
         if self._active_det == mode:
             self._active_det = None
         if mode == "obj":
@@ -1119,6 +1159,14 @@ class MainWindow(QWidget):
                 pip_state["on"] = False
                 # 互换状态是用户偏好：丢失回原比例不复位，重新放大时保持
                 self.s.pip.emit(QImage(), seq)  # null图 → 隐藏小窗
+            # 主目标框内画面 → 预览框左侧识别目标小窗实时更新
+            # （目标丢失时不发信号，小窗保持最后一帧防闪烁；截取在画锁定红框之前，与小窗同理）
+            if dets:
+                x1, y1, x2, y2, _, _ = self._primary_det(dets)
+                cc = frame[max(0, y1):max(1, y2), max(0, x1):max(1, x2)]
+                if cc is not None and cc.size:
+                    self.s.crop.emit(
+                        self._qimg(build_origin_pip(cc, self._crop_size)), seq)
             with self._det_lock:
                 self._last_det = (frame.copy(), list(dets)) if dets else None
             if not dets:
@@ -1137,8 +1185,10 @@ class MainWindow(QWidget):
                 cv2.putText(full, f"LOCKED {rlabel}",
                             (rx1, max(ry1 - 8, 14)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            # 主画面：互换时显示原画面，否则显示放大画面（未放大时两者相同）
-            disp = full if (show_pip and self._pip_swapped) else frame
+            # 主画面：互换时恒显示原画面，否则显示放大画面（未放大时两者相同）
+            # 注意：不能拿 show_pip 当门槛——放大推近初期 show_pip 还是 False，
+            # 若据此切回 frame 会让主画面在"原画面↔推近画面"间闪跳
+            disp = full if self._pip_swapped else frame
             qimg = self._qimg(disp)
             if qimg:
                 self.s.img.emit(qimg)
@@ -1210,6 +1260,27 @@ class MainWindow(QWidget):
         else:
             self.pip_label.setPixmap(QPixmap.fromImage(qimg))
             self.pip_label.show()
+
+    # ---- 预览框左侧识别目标小窗（仅目标/人体检测运行时显示） ----
+    def _show_crop_panel(self):
+        """显示识别目标小窗并复位占位文字（目标/人体检测启动时调用）"""
+        self._place_crop_label()
+        self.crop_label.clear()
+        self.crop_label.setText("等待识别")
+        self.crop_label.show()
+
+    def _hide_crop_panel(self):
+        """隐藏并清空识别目标小窗（停止/切换检测、离开识别界面时调用）"""
+        if getattr(self, 'crop_label', None) and not self.crop_label.isHidden():
+            self.crop_label.hide()
+            self.crop_label.clear()
+
+    def _on_crop(self, qimg, seq):
+        """识别目标小窗：主目标框内画面（带会话序号防旧会话残留）"""
+        if seq != self._det_seq or qimg.isNull():
+            return
+        self.crop_label.clear()  # 清占位文字
+        self.crop_label.setPixmap(QPixmap.fromImage(qimg))
 
     def _show(self, qimg):
         vw, vh = self.view.width(), self.view.height()
