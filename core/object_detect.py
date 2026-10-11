@@ -100,8 +100,8 @@ def preload_one(pt_path):
     from gpulock import warmup_once
 
     def _warm():
-        dummy = torch.zeros(1, 3, 640, 640).to(device)
-        model.predict(dummy, verbose=False)
+        dummy = torch.zeros(1, 3, 1440, 1440).to(device)
+        model.predict(dummy, verbose=False, imgsz=1440)
         del dummy
         torch.cuda.empty_cache()
 
@@ -126,11 +126,12 @@ def get_model_names():
     return [name for name, _, _, _ in _loaded_models]
 
 
-def run_single(get_frame, model_name, callback=None):
+def run_single(get_frame, model_name, callback=None, box_smooth=None):
     """
     单模型目标检测
     get_frame: 获取最新帧的函数，返回 (ret, frame)
     model_name: 模型名称（如 "tank"、"balloon"、"ship"）
+    box_smooth: 可选 zoom_track.BoxSmoother，画框前平滑坐标（防放大后框抖）
     """
     target = None
     for name, model, color, classes in _loaded_models:
@@ -164,9 +165,9 @@ def run_single(get_frame, model_name, callback=None):
             break
 
         results = model.predict(frame, conf=CONF_THRESH, verbose=False,
-                                device=_device, imgsz=640)
+                                device=_device, imgsz=1440)
 
-        detections = []
+        raw = []
         for r in results:
             for box in r.boxes:
                 cls_id = int(box.cls[0])
@@ -178,11 +179,14 @@ def run_single(get_frame, model_name, callback=None):
                     continue
                 label = classes.get(cls_id, classes.get(str(cls_id), str(cls_id)))
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                detections.append((x1, y1, x2, y2, label, conf))
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-                cv2.putText(frame, f"{label} {conf:.2f}",
-                            (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX,
-                            0.6, color, 2)
+                raw.append((x1, y1, x2, y2, label, conf))
+        # 画框前平滑坐标（检测框逐帧抖动经放大后会变成画面/框抖动）
+        detections = box_smooth.smooth(raw) if box_smooth else raw
+        for x1, y1, x2, y2, label, conf in detections:
+            cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+            cv2.putText(frame, f"{label} {conf:.2f}",
+                        (x1, y1 - 8), cv2.FONT_HERSHEY_SIMPLEX,
+                        0.6, color, 2)
 
         if callback:
             if not callback(frame, detections):

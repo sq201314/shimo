@@ -30,6 +30,7 @@ from ui.progress import CaptureDialog
 from ui.toggle import ToggleButton
 from ui.loading import LoadingPage
 from ui.lock_dialog import LockDialog, ALERT_TEXT
+from ui.pip_view import PipLabel
 
 camera = 1  # 摄像头索引，0为默认摄像头
 
@@ -231,14 +232,19 @@ class MainWindow(QWidget):
         self.view.setStyleSheet("border: 3px solid #555; background: transparent;")
 
         # 放大跟踪原画面小窗：预览框右下角固定位置（仅放大时显示）
+        # 点击小窗 → 主画面与小窗内容互换，再点换回
         sys.path.insert(0, os.path.join(BASE_DIR, "core"))
         from zoom_track import PIP_SIZE, PIP_MARGIN
         self._pip_size, self._pip_margin = PIP_SIZE, PIP_MARGIN
-        self.pip_label = QLabel(self.view)
+        self._pip_swapped = False  # 小窗与主画面是否互换（用户偏好：只有点击才改变，不自动复位）
+        self.pip_label = PipLabel(self.view)
         self.pip_label.setFixedSize(PIP_SIZE, PIP_SIZE)
-        self.pip_label.setScaledContents(True)  # 原画面小窗按框缩放（尺寸=PIP_SIZE）
+        self.pip_label.setScaledContents(True)  # 小窗画面按框缩放（尺寸=PIP_SIZE）
         self.pip_label.setStyleSheet(
             "background: #000; border: 2px solid #C8C8C8;")
+        self.pip_label.setCursor(Qt.PointingHandCursor)
+        self.pip_label.setToolTip("点击：主画面与小窗画面互换")
+        self.pip_label.clicked.connect(self._on_pip_click)
         self.pip_label.move(vw - PIP_SIZE - PIP_MARGIN,
                             vh - PIP_SIZE - PIP_MARGIN)
         self.pip_label.hide()
@@ -473,6 +479,12 @@ class MainWindow(QWidget):
         if not self.cap.isOpened():
             MsgDialog.info(self, "错误", "无法打开摄像头")
             return
+        # 请求 OBS 虚拟摄像头画布原生 2K 分辨率（回读实际值，驱动不支持时保持默认）
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 2560)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1440)
+        act_w = int(self.cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+        act_h = int(self.cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        print(f"[摄像头] 请求 2560x1440，实际 {act_w}x{act_h}")
         MsgDialog.info(self, "成功", "摄像头已接入")
         self.running = True
         self._capture_running = True
@@ -816,7 +828,7 @@ class MainWindow(QWidget):
             self._det_seq += 1          # 旧线程回调发现序号变化立即返回False
             self.pose_running = False
             self.running = False
-            # 隐藏放大跟踪原画面小窗
+            # 隐藏放大跟踪原画面小窗（互换状态是偏好，不复位）
             if getattr(self, 'pip_label', None):
                 self.pip_label.hide()
                 self.pip_label.clear()
@@ -1007,7 +1019,7 @@ class MainWindow(QWidget):
         只处理当前会话的自然退出；切换时旧会话的通知直接忽略（样式已在停止时重置）"""
         if seq != self._det_seq:
             return
-        # 检测自然停止 → 隐藏原画面小窗
+        # 检测自然停止 → 隐藏原画面小窗（互换状态是偏好，不复位）
         if getattr(self, 'pip_label', None):
             self.pip_label.hide()
             self.pip_label.clear()
@@ -1056,8 +1068,10 @@ class MainWindow(QWidget):
             if not model_name:
                 return
 
+            from zoom_track import BoxSmoother
             object_detect.run_single(get_frame=self._get_frame, model_name=model_name,
-                                     callback=self._make_det_cb(seq))
+                                     callback=self._make_det_cb(seq),
+                                     box_smooth=BoxSmoother())
         except Exception as e:
             print(f"目标检测线程错误: {e}")
         finally:
@@ -1069,8 +1083,10 @@ class MainWindow(QWidget):
             sys.path.insert(0, os.path.join(BASE_DIR, "core"))
             import person_detect
 
+            from zoom_track import BoxSmoother
             person_detect.run(get_frame=self._get_frame,
-                              callback=self._make_det_cb(seq))
+                              callback=self._make_det_cb(seq),
+                              box_smooth=BoxSmoother())
         except Exception as e:
             print(f"人体检测线程错误: {e}")
         finally:
@@ -1087,17 +1103,21 @@ class MainWindow(QWidget):
         def cb(frame, dets):
             if self._det_seq != seq:  # 会话已切换 → 立即退出
                 return False
-            full = frame  # 原尺寸全画面（右下角固定小窗用）
+            full = frame  # 原尺寸全画面（小窗/互换后主画面用）
+            raw_dets = list(dets)  # 原坐标检测结果（原画面上画红框用）
             # 识别到目标 → 自动裁剪放大跟踪（目标保持在画面中间）；
             # 短暂丢失冻结窗口防闪烁，真正丢失回到原比例
             # 检测仍在原尺寸帧上完成，此处只裁剪显示画面并平移检测坐标
-            frame, dets, zoomed = zoom.apply(frame, dets)
-            if zoomed:
-                # 放大中 → 预览框右下角固定位置显示原画面小窗（PIP_SIZE）
-                self.s.pip.emit(self._qimg(build_origin_pip(full)), seq)
+            frame, dets, show_pip = zoom.apply(frame, dets)
+            if show_pip:
+                # 放大中 → 右下角固定小窗：默认显示原画面；
+                # 点击互换后主画面=原画面、小窗=放大画面（内容取反即可）
+                pip_src = frame if self._pip_swapped else full
+                self.s.pip.emit(self._qimg(build_origin_pip(pip_src)), seq)
                 pip_state["on"] = True
             elif pip_state["on"]:
                 pip_state["on"] = False
+                # 互换状态是用户偏好：丢失回原比例不复位，重新放大时保持
                 self.s.pip.emit(QImage(), seq)  # null图 → 隐藏小窗
             with self._det_lock:
                 self._last_det = (frame.copy(), list(dets)) if dets else None
@@ -1105,16 +1125,29 @@ class MainWindow(QWidget):
                 # 目标丢失 → 自动解除红框锁定，重新识别后需再走 Ctrl+左键 确认流程
                 self._lock_on = False
             elif self._lock_on:
-                # Yes锁定后：主目标标注红色框（坐标已平移到裁剪画面）
+                # Yes锁定后：主目标标注红色框——两个画面都标
+                # ① 裁剪画面用平移后坐标
                 x1, y1, x2, y2, label, _ = self._primary_det(dets)
                 cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 255), 3)
                 cv2.putText(frame, f"LOCKED {label}", (x1, max(y1 - 8, 14)),
                             cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-            qimg = self._qimg(frame)
+                # ② 原画面用原始坐标（互换后主画面显示原画面时也要有红框）
+                rx1, ry1, rx2, ry2, rlabel, _ = self._primary_det(raw_dets)
+                cv2.rectangle(full, (rx1, ry1), (rx2, ry2), (0, 0, 255), 3)
+                cv2.putText(full, f"LOCKED {rlabel}",
+                            (rx1, max(ry1 - 8, 14)),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+            # 主画面：互换时显示原画面，否则显示放大画面（未放大时两者相同）
+            disp = full if (show_pip and self._pip_swapped) else frame
+            qimg = self._qimg(disp)
             if qimg:
                 self.s.img.emit(qimg)
             return True
         return cb
+
+    def _on_pip_click(self):
+        """点击右下角小窗：主画面与小窗内容互换（再点换回）"""
+        self._pip_swapped = not self._pip_swapped
 
     @staticmethod
     def _primary_det(dets):
